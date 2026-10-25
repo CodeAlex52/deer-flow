@@ -196,3 +196,93 @@ test("a response whose body completes after an account switch cannot restore the
 
   expect(ctx!.user).toEqual(nextUser);
 });
+
+function withClock(ms: number) {
+  const spy = rs.spyOn(Date, "now").mockReturnValue(ms);
+  return () => spy.mockRestore();
+}
+
+test("a transient auth failure stays recoverable on a later visibility check", async () => {
+  const restoreClock = withClock(100_000);
+  mount();
+  let failNext = true;
+  globalThis.fetch = rs.fn(async () => {
+    if (failNext) throw new TypeError("Failed to fetch");
+    return jsonResponse(initialUser);
+  }) as unknown as typeof globalThis.fetch;
+
+  const wake = (type: string) =>
+    act(async () => {
+      document.dispatchEvent(new Event(type));
+      await Promise.resolve();
+    });
+
+  await wake("visibilitychange"); // the first auth request rejects
+  expect(ctx!.user).toBeNull();
+  expect(push).not.toHaveBeenCalled();
+
+  // The next auth response is a valid user. Unknown identity is not a logout,
+  // so a later visible event revalidates instead of staying stuck at null.
+  failNext = false;
+  restoreClock();
+  const laterClock = withClock(160_001);
+  await wake("visibilitychange");
+  laterClock();
+
+  expect(ctx!.user).toEqual(initialUser);
+  expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+});
+
+test("reconnect recovers an unknown auth state without waiting out the throttle", async () => {
+  const restoreClock = withClock(100_000);
+  mount();
+  let failNext = true;
+  globalThis.fetch = rs.fn(async () => {
+    if (failNext) throw new TypeError("Failed to fetch");
+    return jsonResponse(initialUser);
+  }) as unknown as typeof globalThis.fetch;
+
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await Promise.resolve();
+  });
+  expect(ctx!.user).toBeNull();
+
+  // Connectivity returns seconds later; recovery must not wait out the 60 s
+  // visibility throttle.
+  failNext = false;
+  restoreClock();
+  const laterClock = withClock(105_000);
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await Promise.resolve();
+  });
+  laterClock();
+
+  expect(ctx!.user).toEqual(initialUser);
+  expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+});
+
+test("a confirmed 401 logout still skips future visibility checks", async () => {
+  mount();
+  let calls = 0;
+  globalThis.fetch = rs.fn(async () => {
+    calls += 1;
+    return jsonResponse(
+      { detail: { code: "token_expired", message: "Token expired" } },
+      401,
+    );
+  }) as unknown as typeof globalThis.fetch;
+
+  await act(async () => {
+    await ctx!.refreshUser();
+  });
+  expect(ctx!.user).toBeNull();
+
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await Promise.resolve();
+  });
+
+  expect(calls).toBe(1);
+});

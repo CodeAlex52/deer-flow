@@ -192,6 +192,11 @@ export function AuthProvider({
   /**
    * Handle visibility change - refresh user when tab becomes visible again.
    * Throttled to at most once per 60 s to avoid spamming the backend on rapid tab switches.
+   *
+   * `user === null` with `authKnown === false` is an unknown identity — a
+   * transient fetch failure set it (#7527) — not a confirmed logout, so it
+   * stays eligible for a later check and a visible tab can recover without a
+   * reload. Only a confirmed logout (401 / logout) skips future checks.
    */
   const lastCheckRef = React.useRef(0);
 
@@ -199,18 +204,29 @@ export function AuthProvider({
     if (staticMode) return;
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible" || user === null) return;
+      if (document.visibilityState !== "visible" || (user === null && authKnown)) return;
       const now = Date.now();
       if (now - lastCheckRef.current < 60_000) return;
       lastCheckRef.current = now;
       void refreshUser();
     };
 
+    const handleReconnect = () => {
+      // Recover an unknown auth state promptly when connectivity returns (#7527)
+      // instead of waiting out the visibility throttle. A confirmed logout stays
+      // out, and a known session keeps its throttled visibility cadence.
+      if (authKnown) return;
+      lastCheckRef.current = Date.now();
+      void refreshUser();
+    };
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleReconnect);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleReconnect);
     };
-  }, [staticMode, user, refreshUser]);
+  }, [staticMode, user, authKnown, refreshUser]);
 
   const value: AuthContextType = {
     user,
