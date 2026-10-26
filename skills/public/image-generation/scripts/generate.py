@@ -221,7 +221,17 @@ def _generate_image_gemini(
     for reference_image in valid_reference_images:
         with open(reference_image, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_b64}})
+        # Declare the MIME type of the bytes actually being sent. These references
+        # reach the API unconverted, so a fixed ``image/jpeg`` label misdescribes
+        # every PNG/WebP/GIF reference.
+        parts.append(
+            {
+                "inlineData": {
+                    "mimeType": _guess_mime(reference_image),
+                    "data": image_b64,
+                }
+            }
+        )
 
     bearer_value = os.getenv("GEMINI_API_KEY")
     if not bearer_value:
